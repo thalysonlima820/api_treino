@@ -9,9 +9,22 @@ $app->options('/{routes:.+}', function ($request, $response, $args) {
 
 // Routes
 require __DIR__ . '/routes/autenticacao.php';
-require __DIR__ . '/routes/produtos.php';
-
+require __DIR__ . '/routes/precificacao.php';
+require __DIR__ . '/routes/etiqueta.php';
+require __DIR__ . '/routes/metas.php';
 require __DIR__ . '/routes/usuarios.php';
+require __DIR__ . '/routes/financeiro.php';
+require __DIR__ . '/routes/estoque.php';
+require __DIR__ . '/routes/dre.php';
+require __DIR__ . '/routes/Limite.php';
+require __DIR__ . '/routes/Transferencia.php';
+require __DIR__ . '/routes/Log.php';
+require __DIR__ . '/routes/Prazo.php';
+require __DIR__ . '/routes/Notificacao.php';
+require __DIR__ . '/routes/Agenda.php';
+require __DIR__ . '/routes/Concorrente.php';
+require __DIR__ . '/routes/EntradaSemVenda.php';
+
 
 
 

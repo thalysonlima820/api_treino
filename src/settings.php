@@ -16,16 +16,11 @@ return [
             'level' => \Monolog\Logger::DEBUG,
         ],
 
-                // DB settingd
-        'db' => [
-            'driver' => 'mysql',
-            'host' => 'localhost',
-            'database' => 'slim',
-            'username' => 'root',
-            'password' => '',
-            // 'charset' => 'utf8',
-            // 'collation' => 'utf8_unicode_ci',
-            // 'prefix' => '',
+         // DB settings (Oracle)
+         'db' => [
+            'dsn' => "(DESCRIPTION=(ADDRESS_LIST=(ADDRESS=(PROTOCOL=TCP)(HOST=192.168.1.199)(PORT=1521)))(CONNECT_DATA=(SID=WINT)))",
+            'username' => 'LIDER',
+            'password' => 'LIDER2K18',
         ],
 
         //secret
