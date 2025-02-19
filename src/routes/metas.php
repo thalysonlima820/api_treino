@@ -1370,6 +1370,16 @@ $app->group('/api/v1', function () {
         return $response->withJson($filiais);
     });
 
+
+
+
+
+
+
+
+
+
+
     $this->get('/financeiro/alerta/titulosvencidos', function (Request $request, Response $response) {
         $settings = $this->get('settings')['db'];
         $dsn = $settings['dsn'];
@@ -2493,6 +2503,26 @@ $app->group('/api/v1', function () {
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    
+
+
     $this->get('/metas/{ano}', function (Request $request, Response $response) {
 
         $settings = $this->get('settings')['db'];
@@ -2991,7 +3021,6 @@ $app->group('/api/v1', function () {
 
         return $response->withJson($filiais);
     });
-
     $this->post('/porcentagem/insert', function (Request $request, Response $response) {
         // Pega a conexão do Oracle configurada
         $settings = $this->get('settings')['db'];
@@ -3065,7 +3094,6 @@ $app->group('/api/v1', function () {
 
         return $response->withJson(['message' => $message], 200);
     });
-
     $this->get('/porcentagem/pesquisa', function (Request $request, Response $response) {
         $settings = $this->get('settings')['db'];
         $dsn = $settings['dsn'];
@@ -3137,7 +3165,6 @@ $app->group('/api/v1', function () {
         // Retornar resultados em JSON
         return $response->withJson($grupos);
     });
-
     $this->post('/porcentagem/mes/insert', function (Request $request, Response $response) {
         // Pega a conexão do Oracle configurada
         $settings = $this->get('settings')['db'];
@@ -3211,7 +3238,6 @@ $app->group('/api/v1', function () {
 
         return $response->withJson(['message' => $message], 200);
     });
-
     $this->get('/porcentagem/mes/pesquisa', function (Request $request, Response $response) {
         $settings = $this->get('settings')['db'];
         $dsn = $settings['dsn'];

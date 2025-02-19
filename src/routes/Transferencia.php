@@ -8,6 +8,288 @@ use Symfony\Component\Console\Descriptor\Descriptor;
 // Rota para listar os dados de PCFILIAL
 $app->group('/api/v1', function () {
 
+    $this->get('/transferencia/estrategica/geral/{filial_saida}/{filial_entrada}/{codepto}', function (Request $request, Response $response) {
+
+        $settings = $this->get('settings')['db'];
+        $dsn = $settings['dsn'];
+        $username = $settings['username'];
+        $password = $settings['password'];
+
+        // Conectando ao Oracle
+        $conexao = oci_connect($username, $password, $dsn);
+
+        if (!$conexao) {
+            $e = oci_error();
+            throw new Exception($e['message']);
+        }
+
+        $filial_saida = $request->getAttribute('filial_saida');
+        $filial_entrada = $request->getAttribute('filial_entrada');
+        $codepto = $request->getAttribute('codepto');
+
+        $sql = " WITH ESTOQUE_FIC AS (
+
+            SELECT E.CODPROD, E.CODFILIAL
+            FROM PCEST E
+
+            ),      
+                DIAS_DEPTO AS (
+
+                SELECT 
+                    D.CODEPTO, 
+                    D.DESCRICAO,
+
+                    CASE
+                        WHEN D.CODEPTO = 17 THEN 5
+                        WHEN D.CODEPTO = 18 THEN 15
+                        WHEN D.CODEPTO = 19 THEN 10
+                        WHEN D.CODEPTO = 20 THEN 5
+                        WHEN D.CODEPTO = 21 THEN 10
+                        WHEN D.CODEPTO = 22 THEN 10
+                        WHEN D.CODEPTO = 23 THEN 10
+                        WHEN D.CODEPTO = 24 THEN 10
+                        WHEN D.CODEPTO = 25 THEN 5
+                        WHEN D.CODEPTO = 26 THEN 5
+                        WHEN D.CODEPTO = 27 THEN 5
+                        WHEN D.CODEPTO = 28 THEN 10
+                        WHEN D.CODEPTO = 116 THEN 15
+                    END AS DIASESTOQUE
+                
+                FROM PCDEPTO D
+                WHERE D.CODEPTO IN (17,18,19,20,21,22,23,24,25,26,27,28,116)
+                ORDER BY D.CODEPTO
+
+                ),
+
+            FILIA_SAIR AS (
+
+            SELECT 
+                FIC.CODFILIAL AS CODFILIAL_S,
+                FIC.CODPROD, 
+                p.CODAUXILIAR,
+                P.DESCRICAO AS PRODUTO,
+                D.CODEPTO,
+                D.DESCRICAO AS DEPARTAMENTO,
+                C.CODSEC, 
+                C.DESCRICAO,
+                MC.MARCA,
+                (E.QTESTGER - E.QTRESERV - E.QTBLOQUEADA) AS ESTOQUE_S,
+                E.ESTMIN AS ESTMIN_S,
+                E.ESTMAX AS ESTMAX_S,
+                E.QTGIRODIA AS GIRODIA_S,
+                P.TEMREPOS AS TEMREPOS_S,
+                    CASE 
+                        WHEN (E.QTGIRODIA * P.TEMREPOS) > E.ESTMIN THEN (E.QTGIRODIA * P.TEMREPOS)
+                        ELSE E.ESTMIN
+                    END AS ESTOQUE_IDEAL_S
+
+            FROM ESTOQUE_FIC FIC, PCPRODUT P, PCEST E, PCDEPTO D, PCSECAO C, PCMARCA MC
+            WHERE FIC.CODPROD = P.CODPROD
+            AND FIC.CODPROD = E.CODPROD 
+            AND FIC.CODFILIAL = E.CODFILIAL
+            AND P.CODMARCA = MC.CODMARCA
+            AND P.CODEPTO = D.CODEPTO
+            AND P.CODSEC = C.CODSEC
+
+            AND FIC.CODFILIAL = :filial_saida
+            AND D.CODEPTO = :codepto
+
+            ORDER BY FIC.CODFILIAL
+
+            ),
+
+            FILIA_ENTRAR AS (
+
+            SELECT 
+                FIC.CODFILIAL AS CODFILIAL_E,
+                FIC.CODPROD, 
+                E.QTBLOQUEADA AS QTBLOQUEADA_E,
+                P.DESCRICAO AS PRODUTO,
+                D.CODEPTO,
+                D.DESCRICAO AS DEPARTAMENTO,
+				C.CODSEC, 
+                C.DESCRICAO,
+                (E.QTESTGER - E.QTRESERV - E.QTBLOQUEADA) AS ESTOQUE_E,
+                E.ESTMIN AS ESTMIN_E,
+                E.ESTMAX AS ESTMAX_E,
+                E.QTGIRODIA AS GIRODIA_E,
+                P.TEMREPOS AS TEMREPOS_E,
+                    CASE 
+                        WHEN (E.QTGIRODIA * P.TEMREPOS) > E.ESTMIN THEN (E.QTGIRODIA * P.TEMREPOS)
+                        ELSE E.ESTMIN
+                    END AS ESTOQUE_IDEAL_E
+
+
+            FROM ESTOQUE_FIC FIC, PCPRODUT P, PCEST E, PCDEPTO D,  PCSECAO C
+            WHERE FIC.CODPROD = P.CODPROD
+            AND FIC.CODPROD = E.CODPROD
+            AND FIC.CODFILIAL = E.CODFILIAL
+            AND P.CODEPTO = D.CODEPTO
+            AND P.CODSEC = C.CODSEC
+
+            AND FIC.CODFILIAL = :filial_entrada
+
+            ORDER BY FIC.CODFILIAL
+
+            ),
+
+            RESUL AS (
+
+
+            SELECT 
+
+                S.CODFILIAL_S,
+                s.CODAUXILIAR,
+                S.CODPROD, 
+                S.PRODUTO,
+                S.CODEPTO,
+                S.DEPARTAMENTO,
+                S.CODSEC, 
+                S.DESCRICAO AS SECAO,
+                S.MARCA,
+                S.ESTOQUE_S,
+                S.ESTMIN_S,
+                S.ESTMAX_S,
+                S.GIRODIA_S,
+                S.TEMREPOS_S,
+                S.ESTOQUE_IDEAL_S,
+                CASE
+                    WHEN S.ESTOQUE_S < S.ESTMIN_S THEN 'RUPTURA'
+                    WHEN S.ESTOQUE_S >= S.ESTMIN_S AND S.ESTOQUE_S < S.ESTOQUE_IDEAL_S THEN 'BAIXO'
+                    WHEN S.ESTOQUE_S = S.ESTOQUE_IDEAL_S THEN 'IDEAL'
+                    WHEN S.ESTOQUE_S > S.ESTOQUE_IDEAL_S AND S.ESTOQUE_S < S.ESTMAX_S THEN 'ALTO'
+                    WHEN S.ESTOQUE_S >= S.ESTMAX_S THEN 'EXCESSO'
+                    ELSE 'ERRO'
+                END AS STATUS_ESTOQUE_S,
+                
+                E.CODFILIAL_E,
+                E.QTBLOQUEADA_E,
+                E.ESTOQUE_E,
+                E.ESTMIN_E,
+                E.ESTMAX_E,
+                E.GIRODIA_E,
+                E.TEMREPOS_E,
+                E.ESTOQUE_IDEAL_E,
+                CASE
+                    WHEN E.ESTOQUE_E < E.ESTMIN_E THEN 'RUPTURA'
+                    WHEN E.ESTOQUE_E >= E.ESTMIN_E AND E.ESTOQUE_E < E.ESTOQUE_IDEAL_E THEN 'BAIXO'
+                    WHEN E.ESTOQUE_E = E.ESTOQUE_IDEAL_E THEN 'IDEAL'
+                    WHEN E.ESTOQUE_E > E.ESTOQUE_IDEAL_E AND E.ESTOQUE_E < E.ESTMAX_E THEN 'ALTO'
+                    WHEN E.ESTOQUE_E >= E.ESTMAX_E THEN 'EXCESSO'
+                    ELSE 'ERRO'
+                END AS STATUS_ESTOQUE_E,
+                
+                
+                ROUND((E.ESTOQUE_IDEAL_E - E.ESTOQUE_E),0) SUGESTAO,
+                ROUND((S.ESTOQUE_S - S.ESTOQUE_IDEAL_S),0) QT_MAX_TRANSF
+                
+            FROM FILIA_SAIR S, FILIA_ENTRAR E
+            WHERE S.CODPROD = E.CODPROD
+
+            ),
+            RESULTADO_FD AS (
+            
+	            SELECT R.*, E.DIASESTOQUE AS TEMPO
+	            FROM RESUL R, DIAS_DEPTO E
+	            WHERE R.CODEPTO = E.CODEPTO
+	            AND R.ESTMAX_E > 0
+            ),
+            CLIENTE AS (
+            
+	            SELECT 
+					CASE 
+						 WHEN F.CODIGO = 1 THEN 4
+						 WHEN F.CODIGO = 2 THEN 317
+						 WHEN F.CODIGO = 3 THEN 5
+						 WHEN F.CODIGO = 4 THEN 8
+						 WHEN F.CODIGO = 5 THEN 1674
+					END AS CODCLIENTE
+				
+				FROM PCFILIAL F
+				WHERE F.CODIGO = :filial_entrada
+            
+            ),
+            TRANSITO AS (
+            
+            SELECT P.CODCLI, P.CODPROD, SUM(P.QT) AS QT FROM PCPEDI P
+            WHERE P.POSICAO = 'M'
+            GROUP BY P.CODCLI, P.CODPROD
+            )
+          
+            
+            
+            SELECT 
+			    R.*, 
+			    COALESCE(P.QT, 0) AS QTTRANSITO 
+			   
+			FROM 
+			    RESULTADO_FD R
+			LEFT JOIN 
+			    TRANSITO P 
+			ON R.CODPROD = P.CODPROD
+			LEFT JOIN 
+				CLIENTE C 
+			ON P.CODCLI = C.CODCLIENTE
+        ";
+
+
+        $stmt = oci_parse($conexao, $sql);
+
+        // Associar a data formatada ao placeholder SQL
+        oci_bind_by_name($stmt, ":filial_saida", $filial_saida);
+        oci_bind_by_name($stmt, ":filial_entrada", $filial_entrada);
+        oci_bind_by_name($stmt, ":codepto", $codepto);
+
+        // Executa a consulta
+        oci_execute($stmt);
+
+        // Coletar os resultados em um array
+        $filiais = [];
+        while (($row = oci_fetch_assoc($stmt)) != false) {
+
+            $row['CODFILIAL_S'] = isset($row['CODFILIAL_S']) ? (int)$row['CODFILIAL_S'] : null;
+            $row['CODPROD'] = isset($row['CODPROD']) ? (int)$row['CODPROD'] : null;
+            $row['CODEPTO'] = isset($row['CODEPTO']) ? (int)$row['CODEPTO'] : null;
+            $row['CODSEC'] = isset($row['CODSEC']) ? (int)$row['CODSEC'] : null;
+            $row['ESTOQUE_S'] = isset($row['ESTOQUE_S']) ? (float)$row['ESTOQUE_S'] : null;
+            $row['ESTMIN_S'] = isset($row['ESTMIN_S']) ? (float)$row['ESTMIN_S'] : null;
+            $row['ESTMAX_S'] = isset($row['ESTMAX_S']) ? (float)$row['ESTMAX_S'] : null;
+            $row['GIRODIA_S'] = isset($row['GIRODIA_S']) ? (float)$row['GIRODIA_S'] : null;
+            $row['ESTOQUE_IDEAL_S'] = isset($row['ESTOQUE_IDEAL_S']) ? (float)$row['ESTOQUE_IDEAL_S'] : null;
+
+            $row['CODFILIAL_E'] = isset($row['CODFILIAL_E']) ? (int)$row['CODFILIAL_E'] : null;
+            $row['ESTOQUE_E'] = isset($row['ESTOQUE_E']) ? (float)$row['ESTOQUE_E'] : null;
+            $row['ESTMIN_E'] = isset($row['ESTMIN_E']) ? (float)$row['ESTMIN_E'] : null;
+            $row['ESTMAX_E'] = isset($row['ESTMAX_E']) ? (float)$row['ESTMAX_E'] : null;
+            $row['GIRODIA_E'] = isset($row['GIRODIA_E']) ? (float)$row['GIRODIA_E'] : null;
+            $row['ESTOQUE_IDEAL_E'] = isset($row['ESTOQUE_IDEAL_E']) ? (float)$row['ESTOQUE_IDEAL_E'] : null;
+            $row['QTBLOQUEADA_E'] = isset($row['QTBLOQUEADA_E']) ? (float)$row['QTBLOQUEADA_E'] : null;
+
+            $row['SUGESTAO'] = isset($row['SUGESTAO']) ? (float)$row['SUGESTAO'] : null;
+            $row['QT_MAX_TRANSF'] = isset($row['QT_MAX_TRANSF']) ? (float)$row['QT_MAX_TRANSF'] : null;
+            $row['QTTRANSITO'] = isset($row['QTTRANSITO']) ? (float)$row['QTTRANSITO'] : null;
+            $row['TEMPO'] = isset($row['TEMPO']) ? (int)$row['TEMPO'] : null;
+            $row['CODAUXILIAR'] = isset($row['CODAUXILIAR']) ? (int)$row['CODAUXILIAR'] : null;
+
+            $filiais[] = $row;
+        }
+
+        // Fechar a conexão
+        oci_free_statement($stmt);
+        oci_close($conexao);
+
+        // Convertendo para UTF-8 os resultados
+        foreach ($filiais as &$filial) {
+            array_walk_recursive($filial, function (&$item) {
+                if (!mb_detect_encoding($item, 'utf-8', true)) {
+                    $item = utf8_encode($item);
+                }
+            });
+        }
+
+        return $response->withJson($filiais);
+    });
+
     $this->get('/transferencia/estrategica/lista/{filial_saida}/{filial_entrada}/{codepto}', function (Request $request, Response $response) {
 
         $settings = $this->get('settings')['db'];
@@ -250,288 +532,6 @@ $app->group('/api/v1', function () {
 		  
 
 
-        ";
-
-
-        $stmt = oci_parse($conexao, $sql);
-
-        // Associar a data formatada ao placeholder SQL
-        oci_bind_by_name($stmt, ":filial_saida", $filial_saida);
-        oci_bind_by_name($stmt, ":filial_entrada", $filial_entrada);
-        oci_bind_by_name($stmt, ":codepto", $codepto);
-
-        // Executa a consulta
-        oci_execute($stmt);
-
-        // Coletar os resultados em um array
-        $filiais = [];
-        while (($row = oci_fetch_assoc($stmt)) != false) {
-
-            $row['CODFILIAL_S'] = isset($row['CODFILIAL_S']) ? (int)$row['CODFILIAL_S'] : null;
-            $row['CODPROD'] = isset($row['CODPROD']) ? (int)$row['CODPROD'] : null;
-            $row['CODEPTO'] = isset($row['CODEPTO']) ? (int)$row['CODEPTO'] : null;
-            $row['CODSEC'] = isset($row['CODSEC']) ? (int)$row['CODSEC'] : null;
-            $row['ESTOQUE_S'] = isset($row['ESTOQUE_S']) ? (float)$row['ESTOQUE_S'] : null;
-            $row['ESTMIN_S'] = isset($row['ESTMIN_S']) ? (float)$row['ESTMIN_S'] : null;
-            $row['ESTMAX_S'] = isset($row['ESTMAX_S']) ? (float)$row['ESTMAX_S'] : null;
-            $row['GIRODIA_S'] = isset($row['GIRODIA_S']) ? (float)$row['GIRODIA_S'] : null;
-            $row['ESTOQUE_IDEAL_S'] = isset($row['ESTOQUE_IDEAL_S']) ? (float)$row['ESTOQUE_IDEAL_S'] : null;
-
-            $row['CODFILIAL_E'] = isset($row['CODFILIAL_E']) ? (int)$row['CODFILIAL_E'] : null;
-            $row['ESTOQUE_E'] = isset($row['ESTOQUE_E']) ? (float)$row['ESTOQUE_E'] : null;
-            $row['ESTMIN_E'] = isset($row['ESTMIN_E']) ? (float)$row['ESTMIN_E'] : null;
-            $row['ESTMAX_E'] = isset($row['ESTMAX_E']) ? (float)$row['ESTMAX_E'] : null;
-            $row['GIRODIA_E'] = isset($row['GIRODIA_E']) ? (float)$row['GIRODIA_E'] : null;
-            $row['ESTOQUE_IDEAL_E'] = isset($row['ESTOQUE_IDEAL_E']) ? (float)$row['ESTOQUE_IDEAL_E'] : null;
-            $row['QTBLOQUEADA_E'] = isset($row['QTBLOQUEADA_E']) ? (float)$row['QTBLOQUEADA_E'] : null;
-
-            $row['SUGESTAO'] = isset($row['SUGESTAO']) ? (float)$row['SUGESTAO'] : null;
-            $row['QT_MAX_TRANSF'] = isset($row['QT_MAX_TRANSF']) ? (float)$row['QT_MAX_TRANSF'] : null;
-            $row['QTTRANSITO'] = isset($row['QTTRANSITO']) ? (float)$row['QTTRANSITO'] : null;
-            $row['TEMPO'] = isset($row['TEMPO']) ? (int)$row['TEMPO'] : null;
-            $row['CODAUXILIAR'] = isset($row['CODAUXILIAR']) ? (int)$row['CODAUXILIAR'] : null;
-
-            $filiais[] = $row;
-        }
-
-        // Fechar a conexão
-        oci_free_statement($stmt);
-        oci_close($conexao);
-
-        // Convertendo para UTF-8 os resultados
-        foreach ($filiais as &$filial) {
-            array_walk_recursive($filial, function (&$item) {
-                if (!mb_detect_encoding($item, 'utf-8', true)) {
-                    $item = utf8_encode($item);
-                }
-            });
-        }
-
-        return $response->withJson($filiais);
-    });
-
-    $this->get('/transferencia/estrategica/geral/{filial_saida}/{filial_entrada}/{codepto}', function (Request $request, Response $response) {
-
-        $settings = $this->get('settings')['db'];
-        $dsn = $settings['dsn'];
-        $username = $settings['username'];
-        $password = $settings['password'];
-
-        // Conectando ao Oracle
-        $conexao = oci_connect($username, $password, $dsn);
-
-        if (!$conexao) {
-            $e = oci_error();
-            throw new Exception($e['message']);
-        }
-
-        $filial_saida = $request->getAttribute('filial_saida');
-        $filial_entrada = $request->getAttribute('filial_entrada');
-        $codepto = $request->getAttribute('codepto');
-
-        $sql = " WITH ESTOQUE_FIC AS (
-
-            SELECT E.CODPROD, E.CODFILIAL
-            FROM PCEST E
-
-            ),      
-                DIAS_DEPTO AS (
-
-                SELECT 
-                    D.CODEPTO, 
-                    D.DESCRICAO,
-
-                    CASE
-                        WHEN D.CODEPTO = 17 THEN 5
-                        WHEN D.CODEPTO = 18 THEN 15
-                        WHEN D.CODEPTO = 19 THEN 10
-                        WHEN D.CODEPTO = 20 THEN 5
-                        WHEN D.CODEPTO = 21 THEN 10
-                        WHEN D.CODEPTO = 22 THEN 10
-                        WHEN D.CODEPTO = 23 THEN 10
-                        WHEN D.CODEPTO = 24 THEN 10
-                        WHEN D.CODEPTO = 25 THEN 5
-                        WHEN D.CODEPTO = 26 THEN 5
-                        WHEN D.CODEPTO = 27 THEN 5
-                        WHEN D.CODEPTO = 28 THEN 10
-                        WHEN D.CODEPTO = 116 THEN 15
-                    END AS DIASESTOQUE
-                
-                FROM PCDEPTO D
-                WHERE D.CODEPTO IN (17,18,19,20,21,22,23,24,25,26,27,28,116)
-                ORDER BY D.CODEPTO
-
-                ),
-
-            FILIA_SAIR AS (
-
-            SELECT 
-                FIC.CODFILIAL AS CODFILIAL_S,
-                FIC.CODPROD, 
-                p.CODAUXILIAR,
-                P.DESCRICAO AS PRODUTO,
-                D.CODEPTO,
-                D.DESCRICAO AS DEPARTAMENTO,
-                C.CODSEC, 
-                C.DESCRICAO,
-                MC.MARCA,
-                (E.QTESTGER - E.QTRESERV - E.QTBLOQUEADA) AS ESTOQUE_S,
-                E.ESTMIN AS ESTMIN_S,
-                E.ESTMAX AS ESTMAX_S,
-                E.QTGIRODIA AS GIRODIA_S,
-                P.TEMREPOS AS TEMREPOS_S,
-                    CASE 
-                        WHEN (E.QTGIRODIA * P.TEMREPOS) > E.ESTMIN THEN (E.QTGIRODIA * P.TEMREPOS)
-                        ELSE E.ESTMIN
-                    END AS ESTOQUE_IDEAL_S
-
-            FROM ESTOQUE_FIC FIC, PCPRODUT P, PCEST E, PCDEPTO D, PCSECAO C, PCMARCA MC
-            WHERE FIC.CODPROD = P.CODPROD
-            AND FIC.CODPROD = E.CODPROD 
-            AND FIC.CODFILIAL = E.CODFILIAL
-            AND P.CODMARCA = MC.CODMARCA
-            AND P.CODEPTO = D.CODEPTO
-            AND P.CODSEC = C.CODSEC
-
-            AND FIC.CODFILIAL = :filial_saida
-            AND D.CODEPTO = :codepto
-
-            ORDER BY FIC.CODFILIAL
-
-            ),
-
-            FILIA_ENTRAR AS (
-
-            SELECT 
-                FIC.CODFILIAL AS CODFILIAL_E,
-                FIC.CODPROD, 
-                E.QTBLOQUEADA AS QTBLOQUEADA_E,
-                P.DESCRICAO AS PRODUTO,
-                D.CODEPTO,
-                D.DESCRICAO AS DEPARTAMENTO,
-				C.CODSEC, 
-                C.DESCRICAO,
-                (E.QTESTGER - E.QTRESERV - E.QTBLOQUEADA) AS ESTOQUE_E,
-                E.ESTMIN AS ESTMIN_E,
-                E.ESTMAX AS ESTMAX_E,
-                E.QTGIRODIA AS GIRODIA_E,
-                P.TEMREPOS AS TEMREPOS_E,
-                    CASE 
-                        WHEN (E.QTGIRODIA * P.TEMREPOS) > E.ESTMIN THEN (E.QTGIRODIA * P.TEMREPOS)
-                        ELSE E.ESTMIN
-                    END AS ESTOQUE_IDEAL_E
-
-
-            FROM ESTOQUE_FIC FIC, PCPRODUT P, PCEST E, PCDEPTO D,  PCSECAO C
-            WHERE FIC.CODPROD = P.CODPROD
-            AND FIC.CODPROD = E.CODPROD
-            AND FIC.CODFILIAL = E.CODFILIAL
-            AND P.CODEPTO = D.CODEPTO
-            AND P.CODSEC = C.CODSEC
-
-            AND FIC.CODFILIAL = :filial_entrada
-
-            ORDER BY FIC.CODFILIAL
-
-            ),
-
-            RESUL AS (
-
-
-            SELECT 
-
-                S.CODFILIAL_S,
-                s.CODAUXILIAR,
-                S.CODPROD, 
-                S.PRODUTO,
-                S.CODEPTO,
-                S.DEPARTAMENTO,
-                S.CODSEC, 
-                S.DESCRICAO AS SECAO,
-                S.MARCA,
-                S.ESTOQUE_S,
-                S.ESTMIN_S,
-                S.ESTMAX_S,
-                S.GIRODIA_S,
-                S.TEMREPOS_S,
-                S.ESTOQUE_IDEAL_S,
-                CASE
-                    WHEN S.ESTOQUE_S < S.ESTMIN_S THEN 'RUPTURA'
-                    WHEN S.ESTOQUE_S >= S.ESTMIN_S AND S.ESTOQUE_S < S.ESTOQUE_IDEAL_S THEN 'BAIXO'
-                    WHEN S.ESTOQUE_S = S.ESTOQUE_IDEAL_S THEN 'IDEAL'
-                    WHEN S.ESTOQUE_S > S.ESTOQUE_IDEAL_S AND S.ESTOQUE_S < S.ESTMAX_S THEN 'ALTO'
-                    WHEN S.ESTOQUE_S >= S.ESTMAX_S THEN 'EXCESSO'
-                    ELSE 'ERRO'
-                END AS STATUS_ESTOQUE_S,
-                
-                E.CODFILIAL_E,
-                E.QTBLOQUEADA_E,
-                E.ESTOQUE_E,
-                E.ESTMIN_E,
-                E.ESTMAX_E,
-                E.GIRODIA_E,
-                E.TEMREPOS_E,
-                E.ESTOQUE_IDEAL_E,
-                CASE
-                    WHEN E.ESTOQUE_E < E.ESTMIN_E THEN 'RUPTURA'
-                    WHEN E.ESTOQUE_E >= E.ESTMIN_E AND E.ESTOQUE_E < E.ESTOQUE_IDEAL_E THEN 'BAIXO'
-                    WHEN E.ESTOQUE_E = E.ESTOQUE_IDEAL_E THEN 'IDEAL'
-                    WHEN E.ESTOQUE_E > E.ESTOQUE_IDEAL_E AND E.ESTOQUE_E < E.ESTMAX_E THEN 'ALTO'
-                    WHEN E.ESTOQUE_E >= E.ESTMAX_E THEN 'EXCESSO'
-                    ELSE 'ERRO'
-                END AS STATUS_ESTOQUE_E,
-                
-                
-                ROUND((E.ESTOQUE_IDEAL_E - E.ESTOQUE_E),0) SUGESTAO,
-                ROUND((S.ESTOQUE_S - S.ESTOQUE_IDEAL_S),0) QT_MAX_TRANSF
-                
-            FROM FILIA_SAIR S, FILIA_ENTRAR E
-            WHERE S.CODPROD = E.CODPROD
-
-            ),
-            RESULTADO_FD AS (
-            
-	            SELECT R.*, E.DIASESTOQUE AS TEMPO
-	            FROM RESUL R, DIAS_DEPTO E
-	            WHERE R.CODEPTO = E.CODEPTO
-	            AND R.ESTMAX_E > 0
-            ),
-            CLIENTE AS (
-            
-	            SELECT 
-					CASE 
-						 WHEN F.CODIGO = 1 THEN 4
-						 WHEN F.CODIGO = 2 THEN 317
-						 WHEN F.CODIGO = 3 THEN 5
-						 WHEN F.CODIGO = 4 THEN 8
-						 WHEN F.CODIGO = 5 THEN 1674
-					END AS CODCLIENTE
-				
-				FROM PCFILIAL F
-				WHERE F.CODIGO = :filial_entrada
-            
-            ),
-            TRANSITO AS (
-            
-            SELECT P.CODCLI, P.CODPROD, SUM(P.QT) AS QT FROM PCPEDI P
-            WHERE P.POSICAO = 'M'
-            GROUP BY P.CODCLI, P.CODPROD
-            )
-          
-            
-            
-            SELECT 
-			    R.*, 
-			    COALESCE(P.QT, 0) AS QTTRANSITO 
-			   
-			FROM 
-			    RESULTADO_FD R
-			LEFT JOIN 
-			    TRANSITO P 
-			ON R.CODPROD = P.CODPROD
-			LEFT JOIN 
-				CLIENTE C 
-			ON P.CODCLI = C.CODCLIENTE
         ";
 
 

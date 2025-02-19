@@ -354,7 +354,7 @@ $app->group('/api/v1', function () {
                                 M.PERPIS AS PIS,
                                 M.PERCOFINS AS COFINS,
                                 (M.PERCREDICMS + M.PERPIS + M.PERCOFINS) AS CREDITO_ENTRADA,
-                                M.VALORULTENT AS VALOR_ULTIMA_ENTRADA,
+                                E.VALORULTENT AS VALOR_ULTIMA_ENTRADA,
                                 M.CODFILIAL AS CODIGO_FILIAL,
                                 M.CODPROD AS COD_PRODUTO,
                                 M.DTMOV AS DATA_ULTIMA_ENTRADA,
@@ -366,10 +366,12 @@ $app->group('/api/v1', function () {
                                         M.DTMOV DESC
                                 ) AS RN
                             FROM
-                                PCMOV M, PCPEDIDO P
+                                PCMOV M, PCPEDIDO P, PCEST E
                             WHERE M.NUMPED = P.NUMPED
                                 AND M.DTMOV > TO_DATE('01-JAN-2024', 'DD-MM-YYYY')
-                                AND M.CODOPER IN ('E','EB')
+                                AND M.CODPROD = E.CODPROD
+                                AND M.CODFILIAL = E.CODFILIAL
+                                AND M.CODOPER IN ('E','EB', 'ET')
                                 AND P.TIPOBONIFIC IN ('N', 'B')
                     
                 
@@ -528,7 +530,7 @@ $app->group('/api/v1', function () {
                                 A.VL_VENDA,
                                 B.PRECOMINSUG,
                                 B.MARKUP,
-                                I.PERCIMP AS IMPOSTO,
+                                (I.PERCIMP *100) AS IMPOSTO,
                                 ROUND(((B.PRECOMINSUG-((I.PERCIMP*B.PRECOMINSUG)+A.CUSTO))/B.PRECOMINSUG)*100, 2) AS MARGEM_FUTURA_WTH
                                 
                                 

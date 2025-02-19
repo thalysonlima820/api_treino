@@ -54,7 +54,6 @@ $app->group('/api/v1', function () {
             return $response->withJson(['error' => $e->getMessage()], 500);
         }
     });
-
     $this->post('/agenda/inserir/usuario', function (Request $request, Response $response) {
         // Pega a conexão do Oracle configurada
         $settings = $this->get('settings')['db'];
@@ -119,7 +118,6 @@ $app->group('/api/v1', function () {
             return $response->withJson(['error' => $e['message']], 500);
         }
     });
-
     $this->post('/agenda/inserir/pedido', function (Request $request, Response $response) {
         $settings = $this->get('settings')['db'];
         $dsn = $settings['dsn'];
@@ -179,8 +177,6 @@ $app->group('/api/v1', function () {
             return $response->withJson(['error' => $e['message']], 500);
         }
     });
-
-
     $this->get('/agenda/usuario/{CODUSUARIO}', function (Request $request, Response $response) {
         try {
             // Configuração do banco de dados
@@ -237,7 +233,6 @@ $app->group('/api/v1', function () {
             return $response->withJson(['error' => 'Erro no servidor.', 'details' => $e->getMessage()], 500);
         }
     });
-    
     $this->delete('/agenda/usuario/{ID}', function (Request $request, Response $response) {
         try {
             // Configuração do banco de dados
@@ -344,9 +339,7 @@ $app->group('/api/v1', function () {
             return $response->withJson(['error' => 'Erro no servidor.', 'details' => $e->getMessage()], 500);
         }
     });
-    
-    
-    $this->get('/agenda/fornecedor/produto/{fornecedor}', function (Request $request, Response $response) {
+    $this->get('/agenda/fornecedor/produto/{fornecedor}/{codfilial}', function (Request $request, Response $response) {
         $settings = $this->get('settings')['db'];
         $dsn = $settings['dsn'];
         $username = $settings['username'];
@@ -361,17 +354,36 @@ $app->group('/api/v1', function () {
         }
 
         $fornecedor = $request->getAttribute('fornecedor');
+        $codfilial = $request->getAttribute('codfilial');
 
         // Consulta SQL com GROUP BY e formato de data correto
         $sql = "WITH ENTRADAS AS (
-                SELECT M.DTMOV AS ULTIMA_ENTRADA, M.CODPROD, P.DESCRICAO AS PRODUTO, F.CODFORNEC, F.FORNECEDOR, D.CODEPTO, D.DESCRICAO AS DEPARTAMENTO,
-                ROW_NUMBER() OVER (PARTITION BY P.CODPROD ORDER BY M.DTMOV DESC ) AS RN,
-                M.PUNIT AS CUSTO, E.ESTMIN, E.ESTMAX, E.QTESTGER AS ESTOQUE, E.QTGIRODIA,
+                SELECT M.CODFILIAL, M.DTMOV AS ULTIMA_ENTRADA, M.CODPROD, P.DESCRICAO AS PRODUTO, F.CODFORNEC, F.FORNECEDOR, D.CODEPTO, D.DESCRICAO AS DEPARTAMENTO,
+                ROW_NUMBER() OVER (PARTITION BY P.CODPROD,  M.CODFILIAL ORDER BY M.DTMOV DESC ) AS RN,
+                EF.ESTOQUEMIN AS ESTMIN, EF.ESTOQUEMAX AS ESTMAX, 
+                ( E.QTESTGER - E.QTBLOQUEADA - E.QTRESERV ) AS ESTOQUE, 
+                E.QTGIRODIA,
                  CASE 
-                        WHEN (E.QTGIRODIA * P.TEMREPOS) > E.ESTMIN THEN (E.QTGIRODIA * P.TEMREPOS)
+                        WHEN (E.QTGIRODIA * (F.PRAZOENTREGA + P.TEMREPOS)) > E.ESTMIN THEN (E.QTGIRODIA * (F.PRAZOENTREGA + P.TEMREPOS))
                         ELSE E.ESTMIN
-                    END AS ESTOQUE_IDEAL
-                FROM PCMOV M, PCPRODUT P, PCFORNEC F, PCDEPTO D, PCPRODFILIAL PF, PCEST E
+                    END AS ESTOQUE_IDEAL,
+                    
+                 GREATEST(
+		            E.QTGIRODIA * (F.PRAZOENTREGA + P.TEMREPOS),
+		            E.ESTMIN
+		        ) - (
+		            (E.QTESTGER - E.QTRESERV - E.QTBLOQUEADA) + COALESCE(E.QTPEDIDA, 0)
+		        ) AS SUGESTAO_COMPRA,
+                F.PRAZOENTREGA,
+                P.CLASSEVENDA,
+                S.DESCRICAO AS SECAO,
+                M.CUSTOULTENT,
+                M.VALORULTENT,
+                MC.MARCA,
+                P.TEMREPOS,
+               	E.QTPERDADIA AS PEDIDO_PENDENTE
+               	
+                FROM PCMOV M, PCPRODUT P, PCFORNEC F, PCDEPTO D, PCPRODFILIAL PF, PCEST E, PCPRODFILIAL EF, PCSECAO S, PCMARCA MC
                 WHERE 1=1
                 AND M.CODPROD = P.CODPROD
                 AND M.CODFORNEC = F.CODFORNEC
@@ -379,20 +391,211 @@ $app->group('/api/v1', function () {
                 AND M.CODFILIAL = PF.CODFILIAL
                 AND M.CODPROD = E.CODPROD
                 AND M.CODFILIAL = E.CODFILIAL
-                AND M.CODEPTO = D.CODEPTO
+                AND M.CODPROD = EF.CODPROD
+                AND M.CODFILIAL = EF.CODFILIAL
+                AND P.CODMARCA = MC.CODMARCA
+                AND P.CODEPTO = D.CODEPTO
+                AND P.CODSEC = S.CODSEC
                 AND M.CODOPER IN ('E','EB')
                 AND P.REVENDA = 'S'
                 AND M.DTMOV > ADD_MONTHS(SYSDATE, -24)
-                AND PF.REVENDA = 'S'
-                AND PF.FORALINHA = 'N'
+                AND EF.REVENDA = 'S'
+                AND EF.FORALINHA = 'N'
+                AND P.OBS2 != 'FL'
                 AND F.CODFORNEC = :fornecedor
-            )
-            SELECT * FROM ENTRADAS
-            WHERE RN = 1
+                AND M.CODFILIAL = :codfilial
+            ),
+            F1 AS (
+			    SELECT
+			        E.CODPROD,
+			        GREATEST(
+			            E.QTGIRODIA * (F.PRAZOENTREGA + P.TEMREPOS),
+			            E.ESTMIN
+			        ) AS B1
+			    FROM
+			        PCEST E
+			        JOIN PCPRODUT P ON E.CODPROD = P.CODPROD
+			        JOIN PCFORNEC F ON F.CODFORNEC = P.CODFORNEC
+			    WHERE
+			        E.CODFILIAL IN (1)
+			),
+			F2 AS (
+			    SELECT
+			        E.CODPROD,
+			        GREATEST(
+			            E.QTGIRODIA * (F.PRAZOENTREGA + P.TEMREPOS),
+			            E.ESTMIN
+			        ) AS B2
+			    FROM
+			        PCEST E
+			        JOIN PCPRODUT P ON E.CODPROD = P.CODPROD
+			        JOIN PCFORNEC F ON F.CODFORNEC = P.CODFORNEC
+			    WHERE
+			        E.CODFILIAL IN (2)
+			),
+			F3 AS (
+			    SELECT
+			        E.CODPROD,
+			        GREATEST(
+			            E.QTGIRODIA * (F.PRAZOENTREGA + P.TEMREPOS),
+			            E.ESTMIN
+			        ) AS B3
+			    FROM
+			        PCEST E
+			        JOIN PCPRODUT P ON E.CODPROD = P.CODPROD
+			        JOIN PCFORNEC F ON F.CODFORNEC = P.CODFORNEC
+			    WHERE
+			        E.CODFILIAL IN (3)
+			),
+			F4 AS (
+			    SELECT
+			        E.CODPROD,
+			        GREATEST(
+			            E.QTGIRODIA * (F.PRAZOENTREGA + P.TEMREPOS),
+			            E.ESTMIN
+			        ) AS B4
+			    FROM
+			        PCEST E
+			        JOIN PCPRODUT P ON E.CODPROD = P.CODPROD
+			        JOIN PCFORNEC F ON F.CODFORNEC = P.CODFORNEC
+			    WHERE
+			        E.CODFILIAL IN (4)
+			),
+			F5 AS (
+			    SELECT
+			        E.CODPROD,
+			        GREATEST(
+			            E.QTGIRODIA * (F.PRAZOENTREGA + P.TEMREPOS),
+			            E.ESTMIN
+			        ) AS B5
+			    FROM
+			        PCEST E
+			        JOIN PCPRODUT P ON E.CODPROD = P.CODPROD
+			        JOIN PCFORNEC F ON F.CODFORNEC = P.CODFORNEC
+			    WHERE
+			        E.CODFILIAL IN (5)
+			),
+			
+			GIRO_MES AS (
+				SELECT M.CODPROD,
+				ROUND(SUM(M.QT) / 3, 2) AS GIRO_3_MESES
+				FROM PCMOV M
+				WHERE M.CODOPER = 'S'
+				AND TRUNC(M.DTMOV) > TRUNC(ADD_MONTHS(SYSDATE, -3))
+				GROUP BY M.CODPROD
+			),
+			
+			VENDAS_3_MESES AS (
+				SELECT 
+				    M.CODPROD,
+				    ROUND(SUM(CASE 
+				        WHEN TO_CHAR(M.DTMOV, 'YYYY-MM') = TO_CHAR(ADD_MONTHS(SYSDATE, -1), 'YYYY-MM') THEN M.QT
+				        ELSE 0
+				    END), 2) AS MES_ANT_1,
+				    ROUND(SUM(CASE 
+				        WHEN TO_CHAR(M.DTMOV, 'YYYY-MM') = TO_CHAR(ADD_MONTHS(SYSDATE, -2), 'YYYY-MM') THEN M.QT
+				        ELSE 0
+				    END), 2) AS MES_ANT_2,
+				        ROUND(SUM(CASE 
+				        WHEN TO_CHAR(M.DTMOV, 'YYYY-MM') = TO_CHAR(ADD_MONTHS(SYSDATE, -3), 'YYYY-MM') THEN M.QT
+				        ELSE 0
+				    END), 2) AS MES_ANT_3,
+				    ROUND(SUM(CASE 
+				        WHEN TO_CHAR(M.DTMOV, 'YYYY-MM') = TO_CHAR(SYSDATE, 'YYYY-MM') THEN M.QT
+				        ELSE 0
+				    END), 2) AS MES_ATUAL
+				FROM 
+				    PCMOV M
+				WHERE 
+				    M.CODOPER = 'S'
+				    AND TRUNC(M.DTMOV) > TRUNC(ADD_MONTHS(SYSDATE, -3))
+				GROUP BY 
+				    M.CODPROD
+				),
+				
+				
+				FINAL AS (
+				
+				  SELECT
+            A.*,
+             (F1.B1 + F2.B2 + F3.B3 + F4.B4 + F5.B5) AS ESTOQUE_IDEAL_MULTI_FILIAL,
+             
+             
+             
+             (
+	            SELECT
+	                SUM(QTESTGER) AS ESTOQUE_TOTAL
+	            FROM
+	                PCEST
+	            WHERE
+	                CODFILIAL IN (1, 2, 3, 4, 5)
+	                AND PCEST.CODPROD = A.CODPROD
+	        ) AS ESTOQUE_MULTI_FILIAL,
+	        
+	        (
+	            SELECT
+	                SUM(ESTOQUEMIN) AS ESTOQUE_TOTAL
+	            FROM
+	                PCPRODFILIAL
+	            WHERE
+	                CODFILIAL IN (1, 2, 3, 4, 5)
+	                AND PCPRODFILIAL.CODPROD = A.CODPROD
+	        ) AS ESTOQUE_MIN_MULTI_FILIAL,
+	        
+	        (
+	            SELECT
+	                SUM(ESTOQUEMAX) AS ESTOQUE_TOTAL
+	            FROM
+	                PCPRODFILIAL
+	            WHERE
+	                CODFILIAL IN (1, 2, 3, 4, 5)
+	                AND PCPRODFILIAL.CODPROD = A.CODPROD
+	        ) AS ESTOQUE_MAX_MULTI_FILIAL,
+	        
+	        
+		        GM.GIRO_3_MESES,
+		        VM.MES_ANT_1,
+		        VM.MES_ANT_2,
+		        VM.MES_ANT_3,
+		        VM.MES_ATUAL,
+	        
+	         CASE
+                    WHEN A.ESTOQUE < A.ESTMIN THEN 'RUPTURA'
+                    WHEN A.ESTOQUE >=  A.ESTMIN AND A.ESTOQUE < A.ESTOQUE_IDEAL THEN 'BAIXO'
+                    WHEN A.ESTOQUE = A.ESTOQUE_IDEAL THEN 'IDEAL'
+                    WHEN A.ESTOQUE > A.ESTOQUE_IDEAL AND A.ESTOQUE < A.ESTMAX THEN 'ALTO'
+                    WHEN A.ESTOQUE >= A.ESTMAX THEN 'EXCESSO'
+                    ELSE 'ERRO'
+                END AS STATUS_ESTOQUE
+
+            FROM ENTRADAS A
+            LEFT JOIN F1 ON F1.CODPROD = A.CODPROD
+		    LEFT JOIN F2 ON F2.CODPROD = A.CODPROD
+		    LEFT JOIN F3 ON F3.CODPROD = A.CODPROD
+		    LEFT JOIN F4 ON F4.CODPROD = A.CODPROD
+		    LEFT JOIN F5 ON F5.CODPROD = A.CODPROD
+		    LEFT JOIN GIRO_MES GM ON GM.CODPROD = A.CODPROD
+		    LEFT JOIN VENDAS_3_MESES VM ON VM.CODPROD = A.CODPROD
+            WHERE A.RN = 1
+				
+				)
+			SELECT 
+			F.*,
+			
+			((ESTOQUE_IDEAL_MULTI_FILIAL) - (F.ESTOQUE_MULTI_FILIAL)) AS QTD_SUGERIDA_MULTI_FILIAL_MENOS_ESTOQUE,
+			CASE
+                    WHEN F.ESTOQUE_MULTI_FILIAL < F.ESTOQUE_MIN_MULTI_FILIAL THEN 'RUPTURA'
+                    WHEN F.ESTOQUE_MULTI_FILIAL >=  F.ESTOQUE_MIN_MULTI_FILIAL AND F.ESTOQUE_MULTI_FILIAL < F.ESTOQUE_IDEAL_MULTI_FILIAL THEN 'BAIXO'
+                    WHEN F.ESTOQUE_MULTI_FILIAL = F.ESTOQUE_IDEAL_MULTI_FILIAL THEN 'IDEAL'
+                    WHEN F.ESTOQUE_MULTI_FILIAL > F.ESTOQUE_IDEAL_MULTI_FILIAL AND F.ESTOQUE_MULTI_FILIAL < F.ESTOQUE_MAX_MULTI_FILIAL THEN 'ALTO'
+                    WHEN F.ESTOQUE_MULTI_FILIAL >= F.ESTOQUE_MAX_MULTI_FILIAL THEN 'EXCESSO'
+                    ELSE 'ERRO'
+             END AS STATUS_ESTOQUE_MULT_FILIAL
+			
+			
+			FROM FINAL F
+
          ";
-
-
-
 
         $stmt = oci_parse($conexao, $sql);
         if (!$stmt) {
@@ -405,6 +608,7 @@ $app->group('/api/v1', function () {
         // Associar parâmetros ao placeholder SQL
 
         oci_bind_by_name($stmt, ":fornecedor", $fornecedor);
+        oci_bind_by_name($stmt, ":codfilial", $codfilial);
 
         // Executa a consulta
         if (!oci_execute($stmt)) {
@@ -420,6 +624,31 @@ $app->group('/api/v1', function () {
         while (($row = oci_fetch_assoc($stmt)) !== false) {
             // Conversão de tipos para garantir que os campos sejam numéricos
             $row['CODFILIAL'] = isset($row['CODFILIAL']) ? (int)$row['CODFILIAL'] : null;
+            $row['CODPROD'] = isset($row['CODPROD']) ? (int)$row['CODPROD'] : null;
+            $row['CODFORNEC'] = isset($row['CODFORNEC']) ? (int)$row['CODFORNEC'] : null;
+            $row['CODEPTO'] = isset($row['CODEPTO']) ? (int)$row['CODEPTO'] : null;
+            $row['ESTMIN'] = isset($row['ESTMIN']) ? (int)$row['ESTMIN'] : null;
+            $row['ESTMAX'] = isset($row['ESTMAX']) ? (int)$row['ESTMAX'] : null;
+            $row['ESTOQUE'] = isset($row['ESTOQUE']) ? (int)$row['ESTOQUE'] : null;
+            $row['QTGIRODIA'] = isset($row['QTGIRODIA']) ? (int)$row['QTGIRODIA'] : null;
+            $row['ESTOQUE_IDEAL'] = isset($row['ESTOQUE_IDEAL']) ? (int)$row['ESTOQUE_IDEAL'] : null;
+            $row['PRAZOENTREGA'] = isset($row['PRAZOENTREGA']) ? (int)$row['PRAZOENTREGA'] : null;
+            $row['CUSTOULTENT'] = isset($row['CUSTOULTENT']) ? (int)$row['CUSTOULTENT'] : null;
+            $row['VALORULTENT'] = isset($row['VALORULTENT']) ? (int)$row['VALORULTENT'] : null;
+            $row['TEMREPOS'] = isset($row['TEMREPOS']) ? (int)$row['TEMREPOS'] : null;
+            $row['ESTOQUE_IDEAL_MULTI_FILIAL'] = isset($row['ESTOQUE_IDEAL_MULTI_FILIAL']) ? (int)$row['ESTOQUE_IDEAL_MULTI_FILIAL'] : null;
+            $row['ESTOQUE_MULTI_FILIAL'] = isset($row['ESTOQUE_MULTI_FILIAL']) ? (int)$row['ESTOQUE_MULTI_FILIAL'] : null;
+            $row['ESTOQUE_MIN_MULTI_FILIAL'] = isset($row['ESTOQUE_MIN_MULTI_FILIAL']) ? (int)$row['ESTOQUE_MIN_MULTI_FILIAL'] : null;
+            $row['ESTOQUE_MAX_MULTI_FILIAL'] = isset($row['ESTOQUE_MAX_MULTI_FILIAL']) ? (int)$row['ESTOQUE_MAX_MULTI_FILIAL'] : null;
+            $row['GIRO_3_MESES'] = isset($row['GIRO_3_MESES']) ? (int)$row['GIRO_3_MESES'] : null;
+
+            $row['MES_ANT_1'] = isset($row['MES_ANT_1']) ? (int)$row['MES_ANT_1'] : null;
+            $row['MES_ANT_2'] = isset($row['MES_ANT_2']) ? (int)$row['MES_ANT_2'] : null;
+            $row['MES_ANT_3'] = isset($row['MES_ANT_3']) ? (int)$row['MES_ANT_3'] : null;
+            $row['MES_ATUAL'] = isset($row['MES_ATUAL']) ? (int)$row['MES_ATUAL'] : null;
+            $row['PEDIDO_PENDENTE'] = isset($row['PEDIDO_PENDENTE']) ? (int)$row['PEDIDO_PENDENTE'] : null;
+            $row['SUGESTAO_COMPRA'] = isset($row['SUGESTAO_COMPRA']) ? (int)$row['SUGESTAO_COMPRA'] : null;
+            $row['QTD_SUGERIDA_MULTI_FILIAL_MENOS_ESTOQUE'] = isset($row['QTD_SUGERIDA_MULTI_FILIAL_MENOS_ESTOQUE']) ? (int)$row['QTD_SUGERIDA_MULTI_FILIAL_MENOS_ESTOQUE'] : null;
           
             $filiais[] = $row;
         }
@@ -442,7 +671,6 @@ $app->group('/api/v1', function () {
         // Retornar resultados em JSON
         return $response->withJson($filiais);
     });
-
     $this->get('/agenda/pedido/produto/{NUMPED}', function (Request $request, Response $response) {
         $settings = $this->get('settings')['db'];
         $dsn = $settings['dsn'];
@@ -523,8 +751,6 @@ $app->group('/api/v1', function () {
         // Retornar resultados em JSON
         return $response->withJson($filiais);
     });
-
-    
     $this->get('/agenda/lista/pedido', function (Request $request, Response $response) {
         $settings = $this->get('settings')['db'];
         $dsn = $settings['dsn'];

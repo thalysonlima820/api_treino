@@ -4,27 +4,33 @@ use Slim\Http\Request;
 use Slim\Http\Response;
 use Symfony\Component\Console\Descriptor\Descriptor;
 
+use Dompdf\Dompdf;
+use Dompdf\Options;
+
+
 $app->group('/api/v1', function () {
 
-
+    //entrada do dia anterior
     $this->get('/financeiro/entrada/sem/saida/{codfilial}', function (Request $request, Response $response) {
-
         $settings = $this->get('settings')['db'];
         $dsn = $settings['dsn'];
         $username = $settings['username'];
         $password = $settings['password'];
-
-        // Conectando ao Oracle
+    
+        // Configurações do Telegram
+        $telegramApiUrl = 'https://api.telegram.org/bot';
+        $telegramToken = '7843895711:AAFyLUOKt797cLX6pxUEeanGP_h40EdtyLQ';
+        $chatIds = ['2004371623', '1273984870']; // IDs dos destinatários
+    
+        // Conexão com o Oracle
         $conexao = oci_connect($username, $password, $dsn);
         if (!$conexao) {
             $e = oci_error();
             $this->logger->error("Erro de conexão ao Oracle: " . $e['message']);
             return $response->withJson(['error' => 'Erro de conexão ao banco de dados'], 500);
         }
-
-        // Obtém parâmetros da rota
+    
         $codfilial = $request->getAttribute('codfilial');
-
         $sql = "SELECT M.DTMOV, M.CODFILIAL, P.CODAUXILIAR, P.CODPROD, P.DESCRICAO, D.DESCRICAO AS DEPARTAMENTO, SUM(M.QT) AS QT
                 FROM PCMOV M, PCPRODUT P, PCDEPTO D
                 WHERE M.CODPROD = P.CODPROD
@@ -32,12 +38,10 @@ $app->group('/api/v1', function () {
                 AND TRUNC(M.DTMOV) = TRUNC(SYSDATE -1)
                 AND M.CODOPER IN ('E', 'ET')
                 AND M.CODFILIAL = :codfilial
-                AND D.DESCRICAO NOT IN ('USO INTERNO')
                 GROUP BY 
                     M.DTMOV, M.CODFILIAL, P.CODAUXILIAR, P.CODPROD, P.DESCRICAO, D.DESCRICAO
-                ORDER BY D.DESCRICAO, P.DESCRICAO
-                ";
-
+                ORDER BY D.DESCRICAO, P.DESCRICAO";
+    
         $stmt = oci_parse($conexao, $sql);
         if (!$stmt) {
             $e = oci_error($conexao);
@@ -45,11 +49,9 @@ $app->group('/api/v1', function () {
             oci_close($conexao);
             return $response->withJson(['error' => 'Erro na preparação da consulta SQL'], 500);
         }
-
-        // Associar a data formatada ao placeholder SQL
+    
         oci_bind_by_name($stmt, ":codfilial", $codfilial);
-
-        // Executa a consulta
+    
         if (!oci_execute($stmt)) {
             $e = oci_error($stmt);
             $this->logger->error("Erro ao executar a consulta SQL: " . json_encode($e));
@@ -57,60 +59,318 @@ $app->group('/api/v1', function () {
             oci_close($conexao);
             return $response->withJson(['error' => 'Erro ao executar a consulta SQL', 'details' => $e], 500);
         }
-
-
-        // Coletar os resultados
+    
         $filiais = [];
         while (($row = oci_fetch_assoc($stmt)) !== false) {
             $row['CODFILIAL'] = isset($row['CODFILIAL']) ? (int)$row['CODFILIAL'] : null;
             $row['CODAUXILIAR'] = isset($row['CODAUXILIAR']) ? (int)$row['CODAUXILIAR'] : null;
             $row['CODPROD'] = isset($row['CODPROD']) ? (int)$row['CODPROD'] : null;
             $row['QT'] = isset($row['QT']) ? (int)$row['QT'] : null;
-
-            $filiais[] = $row;
             $filiais[] = $row;
         }
-
-        // Fechar a conexão
+    
         oci_free_statement($stmt);
         oci_close($conexao);
-
-        // Verificar se há resultados
-
-
-        // Convertendo resultados para UTF-8
-        foreach ($filiais as &$filial) {
-            array_walk_recursive($filial, function (&$item) {
-                if (!mb_detect_encoding($item, 'utf-8', true)) {
-                    $item = utf8_encode($item);
-                }
-            });
+    
+        if (empty($filiais)) {
+            return $response->withJson(['message' => 'Nenhum dado encontrado'], 404);
         }
-
-        $this->logger->info("Consulta executada com sucesso.");
-
-        // Retornar resultados em JSON
-        return $response->withJson($filiais);
+    
+        // Geração do PDF
+        $dataEntrada = date('d/m/Y', strtotime($filiais[0]['DTMOV']));
+        $html = "<h1>ENTRADAS DO DIA ANTERIOR</h1>";
+        $html .= "<p><strong>Data de Entrada:</strong> {$dataEntrada}</p>";
+        $html .= "<p><strong>Filial:</strong> {$filiais[0]['CODFILIAL']}</p>";
+    
+        // Agrupar por departamento
+        $departamentos = [];
+        foreach ($filiais as $filial) {
+            $departamentos[$filial['DEPARTAMENTO']][] = $filial;
+        }
+    
+        foreach ($departamentos as $departamento => $produtos) {
+            $html .= "<h2>Departamento: {$departamento}</h2>";
+            $html .= '<table border="1" cellspacing="0" cellpadding="5">
+                        <tr>
+                            <th>Código Auxiliar</th>
+                            <th>Código Produto</th>
+                            <th>Descrição</th>
+                            <th>Quantidade</th>
+                        </tr>';
+            foreach ($produtos as $produto) {
+                $html .= '<tr>
+                            <td>' . htmlspecialchars($produto['CODAUXILIAR']) . '</td>
+                            <td>' . htmlspecialchars($produto['CODPROD']) . '</td>
+                            <td>' . htmlspecialchars($produto['DESCRICAO']) . '</td>
+                            <td>' . htmlspecialchars($produto['QT']) . '</td>
+                          </tr>';
+            }
+            $html .= '</table>';
+        }
+    
+        $options = new Options();
+        $options->set('defaultFont', 'Courier');
+        $dompdf = new Dompdf($options);
+        $dompdf->loadHtml($html);
+        $dompdf->setPaper('A4', 'landscape');
+        $dompdf->render();
+    
+        $pdfOutput = $dompdf->output();
+        $tempFile = tempnam(sys_get_temp_dir(), 'pdf');
+        file_put_contents($tempFile, $pdfOutput);
+    
+        foreach ($chatIds as $chatId) {
+            $telegramUrl = "{$telegramApiUrl}{$telegramToken}/sendDocument";
+            $data = [
+                'chat_id' => $chatId,
+                'caption' => "Relatório de Entradas do Dia Anterior - Filial {$filiais[0]['CODFILIAL']} \n Favor repassar a lista para o responsável de cada setor para reposição",
+            ];
+            $postFields = array_merge($data, ['document' => new CURLFile($tempFile, 'application/pdf', 'relatorio.pdf')]);
+    
+            $ch = curl_init();
+            curl_setopt($ch, CURLOPT_URL, $telegramUrl);
+            curl_setopt($ch, CURLOPT_POST, true);
+            curl_setopt($ch, CURLOPT_POSTFIELDS, $postFields);
+            curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    
+            $result = curl_exec($ch);
+            if (curl_errno($ch)) {
+                $this->logger->error("Erro ao enviar o PDF para o Telegram: " . curl_error($ch));
+            } else {
+                $this->logger->info("PDF enviado com sucesso para o chat ID: {$chatId}");
+            }
+            curl_close($ch);
+        }
+    
+        unlink($tempFile);
+    
+        return $response->withJson(['message' => 'PDF gerado e enviado para o Telegram com sucesso.']);
     });
-
-
-    $this->get('/financeiro/sem/entrada', function (Request $request, Response $response) {
-
+    //entrada da semana sem venda
+    $this->get('/financeiro/entrada/sem/saida/leo/{codfilial}', function (Request $request, Response $response) {
         $settings = $this->get('settings')['db'];
         $dsn = $settings['dsn'];
         $username = $settings['username'];
         $password = $settings['password'];
-
-        // Conectando ao Oracle
+    
+        // Configurações do Telegram
+        $telegramApiUrl = 'https://api.telegram.org/bot';
+        $telegramToken = '7843895711:AAFyLUOKt797cLX6pxUEeanGP_h40EdtyLQ';
+        $chatIds = ['2004371623', '1273984870']; // IDs dos destinatários
+    
+        // Conexão com o Oracle
         $conexao = oci_connect($username, $password, $dsn);
         if (!$conexao) {
             $e = oci_error();
             $this->logger->error("Erro de conexão ao Oracle: " . $e['message']);
             return $response->withJson(['error' => 'Erro de conexão ao banco de dados'], 500);
         }
+    
+        $codfilial = $request->getAttribute('codfilial');
+        $sql = "WITH ENTRADA AS (
+
+            SELECT M.DTMOV, M.CODFILIAL, P.CODAUXILIAR, P.CODPROD, P.DESCRICAO, D.DESCRICAO AS DEPARTAMENTO, SUM(M.QT) AS QT
+            FROM PCMOV M, PCPRODUT P, PCDEPTO D
+            WHERE M.CODPROD = P.CODPROD
+            AND M.CODEPTO = D.CODEPTO
+            AND M.DTMOV >= SYSDATE -7
+            AND M.DTMOV <= SYSDATE -2
+            AND M.CODOPER IN ('E', 'ET')
+            AND M.CODFILIAL = :codfilial
+            AND M.CODEPTO NOT IN (17,115)
+
+            GROUP BY 
+                M.DTMOV, M.CODFILIAL, P.CODAUXILIAR, P.CODPROD, P.DESCRICAO, D.DESCRICAO
+            ORDER BY D.DESCRICAO, P.DESCRICAO
+
+            ),
+
+            VENDA AS (
+
+            SELECT M.DTMOV, M.CODFILIAL, M.CODPROD FROM PCMOV M
+            WHERE M.CODOPER = 'S'
+            AND M.CODFILIAL = :codfilial
+            AND M.DTMOV >= SYSDATE -7
+
+            )
 
 
-        $sql = "WITH NOTAS AS (
+            SELECT E.DTMOV, E.CODFILIAL, E.CODAUXILIAR, E.CODPROD, E.DESCRICAO, E.DEPARTAMENTO, E.QT
+            FROM ENTRADA E
+            LEFT JOIN VENDA S ON E.CODPROD = S.CODPROD
+            WHERE S.CODPROD IS NULL
+            order by E.DTMOV
+
+        ";
+    
+        $stmt = oci_parse($conexao, $sql);
+        if (!$stmt) {
+            $e = oci_error($conexao);
+            $this->logger->error("Erro ao preparar a consulta SQL: " . $e['message']);
+            oci_close($conexao);
+            return $response->withJson(['error' => 'Erro na preparação da consulta SQL'], 500);
+        }
+    
+        oci_bind_by_name($stmt, ":codfilial", $codfilial);
+    
+        if (!oci_execute($stmt)) {
+            $e = oci_error($stmt);
+            $this->logger->error("Erro ao executar a consulta SQL: " . json_encode($e));
+            oci_free_statement($stmt);
+            oci_close($conexao);
+            return $response->withJson(['error' => 'Erro ao executar a consulta SQL', 'details' => $e], 500);
+        }
+    
+        $filiais = [];
+        while (($row = oci_fetch_assoc($stmt)) !== false) {
+            $row['CODFILIAL'] = isset($row['CODFILIAL']) ? (int)$row['CODFILIAL'] : null;
+            $row['CODAUXILIAR'] = isset($row['CODAUXILIAR']) ? (int)$row['CODAUXILIAR'] : null;
+            $row['CODPROD'] = isset($row['CODPROD']) ? (int)$row['CODPROD'] : null;
+            $row['QT'] = isset($row['QT']) ? (int)$row['QT'] : null;
+            $filiais[] = $row;
+        }
+    
+        oci_free_statement($stmt);
+        oci_close($conexao);
+    
+        if (empty($filiais)) {
+            return $response->withJson(['message' => 'Nenhum dado encontrado'], 404);
+        }
+    
+        // Geração do PDF
+        $html = "<h1>ENTRADAS DA SEMANA SEM VENDA</h1>";
+        $html .= "<h2><strong>Filial:</strong> {$filiais[0]['CODFILIAL']}</h2>";
+        
+        // Agrupar por departamento
+        $departamentos = [];
+        foreach ($filiais as $filial) {
+            $departamentos[$filial['DEPARTAMENTO']][] = $filial;
+        }
+        
+        // Iterar pelos departamentos
+        foreach ($departamentos as $departamento => $produtos) {
+            $html .= "<h2>Departamento: {$departamento}</h2>";
+        
+            // Coletar datas únicas
+            $datasUnicas = [];
+            foreach ($produtos as $produto) {
+                if (!in_array($produto['DTMOV'], $datasUnicas)) {
+                    $datasUnicas[] = $produto['DTMOV'];
+                }
+            }
+        
+            // Exibir datas únicas
+            $html .= "<h3>Datas de Entrada:</h3>";
+            $html .= '<ul>';
+            foreach ($datasUnicas as $data) {
+                $html .= '<li>' . htmlspecialchars($data) . '</li>';
+            }
+            $html .= '</ul>';
+        
+            // Tabela de produtos do departamento
+            $html .= '<table border="1" cellspacing="0" cellpadding="5">
+                        <tr>
+                            <th>Código Auxiliar</th>
+                            <th>Código Produto</th>
+                            <th>Descrição</th>
+                            <th>Quantidade</th>
+                        </tr>';
+            foreach ($produtos as $produto) {
+                $html .= '<tr>
+                            <td>' . htmlspecialchars($produto['CODAUXILIAR']) . '</td>
+                            <td>' . htmlspecialchars($produto['CODPROD']) . '</td>
+                            <td>' . htmlspecialchars($produto['DESCRICAO']) . '</td>
+                            <td>' . htmlspecialchars($produto['QT']) . '</td>
+                          </tr>';
+            }
+            $html .= '</table>';
+        }
+        
+        
+    
+        $options = new Options();
+        $options->set('defaultFont', 'Courier');
+        $dompdf = new Dompdf($options);
+        $dompdf->loadHtml($html);
+        $dompdf->setPaper('A4', 'landscape');
+        $dompdf->render();
+    
+        $pdfOutput = $dompdf->output();
+        $tempFile = tempnam(sys_get_temp_dir(), 'pdf');
+        file_put_contents($tempFile, $pdfOutput);
+    
+        foreach ($chatIds as $chatId) {
+            $telegramUrl = "{$telegramApiUrl}{$telegramToken}/sendDocument";
+            $data = [
+                'chat_id' => $chatId,
+                'caption' => "Relatório de Entradas da Semana Sem Venda - Filial {$filiais[0]['CODFILIAL']} \n RELATÓRIO EMITIDO ÀS SEGUNDAS \n Verifique se os Produtos da lista estão na área de Venda ou se realmente são produtos de baixo giro.",
+            ];
+            $postFields = array_merge($data, ['document' => new CURLFile($tempFile, 'application/pdf', 'relatorio.pdf')]);
+    
+            $ch = curl_init();
+            curl_setopt($ch, CURLOPT_URL, $telegramUrl);
+            curl_setopt($ch, CURLOPT_POST, true);
+            curl_setopt($ch, CURLOPT_POSTFIELDS, $postFields);
+            curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    
+            $result = curl_exec($ch);
+            if (curl_errno($ch)) {
+                $this->logger->error("Erro ao enviar o PDF para o Telegram: " . curl_error($ch));
+            } else {
+                $this->logger->info("PDF enviado com sucesso para o chat ID: {$chatId}");
+            }
+            curl_close($ch);
+        }
+    
+        unlink($tempFile);
+    
+        return $response->withJson(['message' => 'PDF gerado e enviado para o Telegram com sucesso.']);
+    });
+    $this->get('/financeiro/sem/entrada', function (Request $request, Response $response) {
+        $settings = $this->get('settings')['db'];
+        $dsn = $settings['dsn'];
+        $username = $settings['username'];
+        $password = $settings['password'];
+    
+        // Configurações do Telegram
+        $telegramApiUrl = 'https://api.telegram.org/bot';
+        $telegramToken = '7843895711:AAFyLUOKt797cLX6pxUEeanGP_h40EdtyLQ';
+    
+        // Conexão com o Oracle
+        $conexao = oci_connect($username, $password, $dsn);
+        if (!$conexao) {
+            $e = oci_error();
+            $this->logger->error("Erro de conexão ao Oracle: " . $e['message']);
+            return $response->withJson(['error' => 'Erro de conexão ao banco de dados'], 500);
+        }
+    
+        // Buscar chatIds do banco de dados
+        $sqlChatIds = "
+            SELECT LISTAGG(ID, ', ') WITHIN GROUP (ORDER BY ID) AS IDS
+            FROM SITEIDUSUNOTI
+            WHERE PERMISSAO = 'ENTRADA'
+            GROUP BY PERMISSAO
+        ";
+        $stmtChatIds = oci_parse($conexao, $sqlChatIds);
+        if (!$stmtChatIds || !oci_execute($stmtChatIds)) {
+            $e = oci_error($stmtChatIds);
+            $this->logger->error("Erro ao buscar chat IDs: " . $e['message']);
+            return $response->withJson(['error' => 'Erro ao buscar chat IDs'], 500);
+        }
+    
+        $chatIds = [];
+        while ($row = oci_fetch_assoc($stmtChatIds)) {
+            $chatIds = explode(', ', $row['IDS']);
+        }
+        oci_free_statement($stmtChatIds);
+    
+        if (empty($chatIds)) {
+            $this->logger->warning("Nenhum chat ID encontrado para notificações.");
+            return $response->withJson(['error' => 'Nenhum chat ID encontrado'], 404);
+        }
+    
+        // Novo SQL para buscar dados por data e filial
+        $sql = " WITH NOTAS AS (
                 SELECT 'N' AS SELECIONADO,
                     PCMANIFDESTINATARIO.CODIGO,
                     TO_NUMBER(SUBSTR(PCMANIFDESTINATARIO.CHAVENFE, 26, 9)) NUMNOTA,
@@ -211,10 +471,6 @@ $app->group('/api/v1', function () {
                 ORDER BY NUMNOTA 
 
                 )
-
-
-
-
                 SELECT NT.CODFORNEC, NT.CODFILIAL, NT.NUMNOTA, NT.DATAEMISSAO, NT.FORNECEDOR,  NT.VLTOTALNFE
                 FROM NOTAS NT
                 WHERE NOT EXISTS (
@@ -223,61 +479,100 @@ $app->group('/api/v1', function () {
                     WHERE N.NUMNOTA = NT.NUMNOTA
                 )
                 AND NT.DTENT IS NULL
-                ";
-
+                order by NT.CODFILIAL
+        ";
+    
         $stmt = oci_parse($conexao, $sql);
-        if (!$stmt) {
-            $e = oci_error($conexao);
-            $this->logger->error("Erro ao preparar a consulta SQL: " . $e['message']);
-            oci_close($conexao);
-            return $response->withJson(['error' => 'Erro na preparação da consulta SQL'], 500);
-        }
-
-        // Executa a consulta
-        if (!oci_execute($stmt)) {
+        if (!$stmt || !oci_execute($stmt)) {
             $e = oci_error($stmt);
             $this->logger->error("Erro ao executar a consulta SQL: " . json_encode($e));
             oci_free_statement($stmt);
             oci_close($conexao);
-            return $response->withJson(['error' => 'Erro ao executar a consulta SQL', 'details' => $e], 500);
+            return $response->withJson(['error' => 'Erro ao executar a consulta SQL'], 500);
         }
-
-
-        // Coletar os resultados
-        $filiais = [];
+    
+        $dados = [];
         while (($row = oci_fetch_assoc($stmt)) !== false) {
-            $row['CODFORNEC'] = isset($row['CODFORNEC']) ? (int)$row['CODFORNEC'] : null;
-            $row['CODFILIAL'] = isset($row['CODFILIAL']) ? (int)$row['CODFILIAL'] : null;
-            $row['NUMNOTA'] = isset($row['NUMNOTA']) ? (int)$row['NUMNOTA'] : null;
-            $row['VLTOTALNFE'] = isset($row['VLTOTALNFE']) ? (int)$row['VLTOTALNFE'] : null;
-
-            $filiais[] = $row;
-            $filiais[] = $row;
+            $dataEmissao = $row['DATAEMISSAO'];
+            $codFilial = $row['CODFILIAL'];
+            $dados[$dataEmissao][$codFilial][] = $row;
         }
-
-        // Fechar a conexão
+    
         oci_free_statement($stmt);
         oci_close($conexao);
-
-        // Verificar se há resultados
-
-
-        // Convertendo resultados para UTF-8
-        foreach ($filiais as &$filial) {
-            array_walk_recursive($filial, function (&$item) {
-                if (!mb_detect_encoding($item, 'utf-8', true)) {
-                    $item = utf8_encode($item);
-                }
-            });
+    
+        if (empty($dados)) {
+            return $response->withJson(['message' => 'Nenhum dado encontrado'], 404);
         }
-
-        $this->logger->info("Consulta executada com sucesso.");
-
-        // Retornar resultados em JSON
-        return $response->withJson($filiais);
+    
+        // Geração do PDF
+        $html = "<h1>NF SEM PRÉ-ENTRADA</h1>";
+    
+        foreach ($dados as $dataEmissao => $filiais) {
+            $html .= "<h2>Data de Emissão: {$dataEmissao}</h2>";
+            foreach ($filiais as $codFilial => $produtos) {
+                $html .= "<h3>Filial: {$codFilial}</h3>";
+                $html .= '<table border="1" cellspacing="0" cellpadding="5">
+                            <tr>
+                                <th>Código Fornecedor</th>
+                                <th>Número Nota</th>
+                                <th>Fornecedor</th>
+                                <th>Valor Total NF-e</th>
+                            </tr>';
+                foreach ($produtos as $produto) {
+                    $html .= '<tr>
+                                <td>' . htmlspecialchars($produto['CODFORNEC']) . '</td>
+                                <td>' . htmlspecialchars($produto['NUMNOTA']) . '</td>
+                                <td>' . htmlspecialchars($produto['FORNECEDOR']) . '</td>
+                                <td>' . htmlspecialchars(number_format($produto['VLTOTALNFE'], 2, ',', '.')) . '</td>
+                              </tr>';
+                }
+                $html .= '</table>';
+            }
+        }
+    
+        $options = new Options();
+        $options->set('defaultFont', 'Courier');
+        $dompdf = new Dompdf($options);
+        $dompdf->loadHtml($html);
+        $dompdf->setPaper('A4', 'landscape');
+        $dompdf->render();
+    
+        $pdfOutput = $dompdf->output();
+        $tempFile = tempnam(sys_get_temp_dir(), 'pdf');
+        file_put_contents($tempFile, $pdfOutput);
+    
+        foreach ($chatIds as $chatId) {
+            $telegramUrl = "{$telegramApiUrl}{$telegramToken}/sendDocument";
+            $data = [
+                'chat_id' => $chatId,
+                'caption' => "Relatório NF sem Pré-Entrada - data: " . date('d/m/Y'),
+            ];
+            $postFields = array_merge($data, ['document' => new CURLFile($tempFile, 'application/pdf', 'relatorio.pdf')]);
+    
+            $ch = curl_init();
+            curl_setopt($ch, CURLOPT_URL, $telegramUrl);
+            curl_setopt($ch, CURLOPT_POST, true);
+            curl_setopt($ch, CURLOPT_POSTFIELDS, $postFields);
+            curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    
+            $result = curl_exec($ch);
+            if (curl_errno($ch)) {
+                $this->logger->error("Erro ao enviar o PDF para o Telegram: " . curl_error($ch));
+            } else {
+                $this->logger->info("PDF enviado com sucesso para o chat ID: {$chatId}");
+            }
+            curl_close($ch);
+        }
+    
+        unlink($tempFile);
+    
+        return $response->withJson(['message' => 'PDF gerado e enviado para o Telegram com sucesso.']);
     });
 
 
+
+    
     $this->get('/financeiro/permissao/notificacao', function (Request $request, Response $response) {
 
         $settings = $this->get('settings')['db'];
